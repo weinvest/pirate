@@ -16,21 +16,23 @@ public:
     void Load(const std::string& confPath);
 
     bool GetShibboleth(const char* msg, int32_t len, std::shared_ptr<BufferT> outBuffer);
-    bool IsShibboleth(const char* msg, int32_t len) const; 
-
+    bool IsShibboleth(const char* msg, int32_t len) const;
+    bool IsExclude(const char* msg, int32_t len) const;
+    static std::string currentTime( void );
+    
 private:
     ShibbolethManager(){}
     ShibbolethManager(const ShibbolethManager&);
-    
+
     struct Shibboleth
     {
 	std::string type;
 	re::cregex request;
 	std::string format;
     };
-    
+
     std::shared_ptr<Shibboleth> Find(const char* msg, int32_t len) const;
     std::vector<std::shared_ptr<Shibboleth>> mShibboleths;
+    std::vector<std::string> mExcludeShibboleths;
 };
 #endif
-

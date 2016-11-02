@@ -2,10 +2,12 @@
 #include <vector>
 #include "Connection.h"
 #include "ShibbolethManager.h"
-
-connection::connection(boost::asio::ip::tcp::socket socket)
-    : socket_(std::move(socket))
-    , buffer_mutex_{0}
+#include "Server.h"
+boost::detail::spinlock connection::buffer_mutex_{0};
+std::stack<BufferT*> connection::free_buffers_;
+connection::connection(Server* parent, boost::asio::ip::tcp::socket socket)
+    : mParent(parent)
+    , socket_(std::move(socket))
     , stoped_(false)
     , working_(false)
 {
@@ -20,7 +22,10 @@ void connection::stop()
 {
     stoped_ = true;
     socket_.close();
+    mParent->get_connections().erase(shared_from_this());
+    std::cout<< "--one connection has stopped" << std::endl;
 }
+
 
 void connection::do_read()
 {
@@ -34,12 +39,13 @@ void connection::do_read()
             auto pBuffer = GetFreeBuffer();
             if(ShibbolethManager::Instance().GetShibboleth(buffer_.data(), bytes_transferred, pBuffer))
             {
-                write(pBuffer);
+                write(pBuffer, true);
             }
             do_read();
         }
         else if (ec != boost::asio::error::operation_aborted)
         {
+            std::cout << ShibbolethManager::currentTime() << ":read error : " << ec.message() << std::endl;
             stop();
         }
     });
@@ -51,24 +57,22 @@ void connection::do_write(std::shared_ptr<BufferT> buffer)
     auto self(shared_from_this());
     int32_t length = *((int32_t*)buffer->data());
     boost::asio::async_write(socket_, boost::asio::buffer(buffer->data() + 4, length),
+    boost::asio::transfer_all(),
     [this, self, length, buffer](boost::system::error_code ec, std::size_t tran)
     {
         working_ = false;
         if (!ec && tran == length)
         {
-            {
-                boost::detail::spinlock::scoped_lock __lock(buffer_mutex_);
-                free_buffers_.push(buffer);
-            }
             if(0 != out_buffers_.size())
             {
                 auto firstBuffer = out_buffers_.front();
-                out_buffers_.pop();
+                out_buffers_.pop_front();
                 do_write(firstBuffer);
             }
         }
         else
         {
+            std::cout << ShibbolethManager::currentTime() << ":write error: " << ec.message() << " message len:" << length << " transfered:" << tran << std::endl;
             stop();
         }
     });
@@ -77,42 +81,54 @@ void connection::do_write(std::shared_ptr<BufferT> buffer)
 std::shared_ptr<BufferT> connection::GetFreeBuffer()
 {
     boost::detail::spinlock::scoped_lock __lock(buffer_mutex_);
+    BufferT* rawBuffer = nullptr;
     if(0 == free_buffers_.size())
     {
-	free_buffers_.push(std::make_shared<BufferT>());
-    }
-
-    auto pBuffer = free_buffers_.top();
-    free_buffers_.pop();
-
-    return pBuffer;
-}
-
-void connection::write(std::shared_ptr<BufferT> pBuffer)
-{
-    if(working_)
-    {
-	out_buffers_.push(pBuffer);
+        rawBuffer = new BufferT();
     }
     else
     {
-	do_write(pBuffer);
+        rawBuffer = free_buffers_.top();
+        free_buffers_.pop();
+    }
+
+    std::function<void(void*)> deallocate = [](void* p)
+    {
+        boost::detail::spinlock::scoped_lock __lock(buffer_mutex_);
+        free_buffers_.push((BufferT*)p);
+    };
+
+    return std::shared_ptr<BufferT>(rawBuffer, deallocate);
+}
+
+
+void connection::write(std::shared_ptr<BufferT> pBuffer, bool firstPri)
+{
+    if(working_)
+    {
+        if(firstPri)
+        {
+            out_buffers_.push_front(pBuffer);
+        }
+        else
+        {
+	        out_buffers_.push_back(pBuffer);
+        }
+    }
+    else
+    {
+	    do_write(pBuffer);
     }
 
 }
 
-void connection::send(const char* buffer, int32_t length)
+void connection::Send(std::shared_ptr<BufferT> pBuffer)
 {
     if(!stoped_)
     {
-	auto pBuffer = GetFreeBuffer();
-
-	*((int32_t*)pBuffer->data()) = length;
-	memcpy(pBuffer->data() + 4, buffer, length);
-
-	socket_.get_io_service().post([this, pBuffer]()
-	{
-	    write(pBuffer);
-	});
+    	socket_.get_io_service().post([this, pBuffer]()
+    	{
+    	    write(pBuffer, false);
+    	});
     }
 }

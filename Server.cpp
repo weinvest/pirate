@@ -53,7 +53,7 @@ void Server::do_accept()
 
         if (!ec)
         {
-            auto pNewConnection = std::make_shared<connection>(std::move(socket_));
+            auto pNewConnection = std::make_shared<connection>(this, std::move(socket_));
             pNewConnection->start();
             mConnections.insert(pNewConnection);
         }

@@ -1,3 +1,6 @@
 build/*
 *.o
 *.swp
+client
+client1
+server
